@@ -45,10 +45,21 @@ def least_squares_scale_scalar(
     if not a.is_floating_point() or not b.is_floating_point():
         raise TypeError("Tensors must be floating point type")
 
-    # Compute dot products for least squares solution
-    num = torch.dot(a.reshape(-1), b.reshape(-1))
-    den = torch.dot(b.reshape(-1), b.reshape(-1)).clamp_min(eps)
-    return num / den
+    # Handle empty tensors to avoid SIGFPE in cublas dot
+    if a.numel() == 0 or b.numel() == 0:
+        return torch.tensor(1.0, device=a.device, dtype=a.dtype)
+
+    # Replace nan/inf so dot does not produce invalid values
+    a = torch.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    b = torch.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Compute dot products on CPU to avoid cublas SIGFPE with degenerate inputs
+    a_flat = a.reshape(-1).float().cpu()
+    b_flat = b.reshape(-1).float().cpu()
+    num = torch.dot(a_flat, b_flat)
+    den = torch.dot(b_flat, b_flat).clamp_min(eps)
+    scale = (num / den).to(device=a.device, dtype=a.dtype)
+    return scale
 
 
 def compute_sky_mask(sky_prediction: torch.Tensor, threshold: float = 0.3) -> torch.Tensor:

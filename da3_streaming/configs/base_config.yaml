@@ -4,9 +4,9 @@ Weights:
   SALAD: './weights/dino_salad.ckpt'
 
 Model:
-  chunk_size: 120
-  overlap: 60
-  loop_chunk_size: 20 # imgs of loop chunk = 2 * loop_chunk_size
+  chunk_size: 12
+  overlap: 6
+  loop_chunk_size: 10 # imgs of loop chunk = 2 * loop_chunk_size
   loop_enable: True
   useDBoW: False
   delete_temp_files: True
@@ -45,7 +45,7 @@ Loop:
     nms_threshold: 25
 
   SIM3_Optimizer:
-    lang_version: 'cpp'
+    lang_version: 'python'
     # choose between 'cpp' or 'python'. will auto set 'python' if c++ version has not installed
     max_iterations: 30
     lambda_init: 1e-6

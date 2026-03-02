@@ -61,18 +61,19 @@ def select_reference_view(
     elif strategy == "middle":
         return torch.full((B,), S // 2, dtype=torch.long, device=x.device)
     
-    # Feature-based strategies require normalized class tokens
-    # Extract and normalize class tokens (first token of each view)
-    img_class_feat = x[:, :, 0] / x[:, :, 0].norm(dim=-1, keepdim=True)  # B S C
-    
+    # Feature-based strategies: run on CPU to avoid cublas SIGFPE with degenerate inputs
+    class_tokens = x[:, :, 0].float().cpu()  # B S C
+    class_norm = class_tokens.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    img_class_feat = class_tokens / class_norm  # B S C
+
     if strategy == "saddle_balanced":
         # Select view with balanced features across multiple metrics
         # Compute similarity matrix
         sim = torch.matmul(img_class_feat, img_class_feat.transpose(1, 2))  # B S S
-        sim_no_diag = sim - torch.eye(S, device=sim.device).unsqueeze(0)
+        sim_no_diag = sim - torch.eye(S, device=sim.device, dtype=sim.dtype).unsqueeze(0)
         sim_score = sim_no_diag.sum(dim=-1) / (S - 1)  # B S
-        
-        feat_norm = x[:, :, 0].norm(dim=-1)  # B S
+
+        feat_norm = class_tokens.norm(dim=-1)  # B S
         feat_var = img_class_feat.var(dim=-1)  # B S
         
         # Normalize all metrics to [0, 1]
@@ -96,20 +97,20 @@ def select_reference_view(
     elif strategy == "saddle_sim_range":
         # Select view with largest similarity range (max - min)
         sim = torch.matmul(img_class_feat, img_class_feat.transpose(1, 2))  # B S S
-        sim_no_diag = sim - torch.eye(S, device=sim.device).unsqueeze(0)
-        
+        sim_no_diag = sim - torch.eye(S, device=sim.device, dtype=sim.dtype).unsqueeze(0)
+
         sim_max = sim_no_diag.max(dim=-1).values  # B S
         sim_min = sim_no_diag.min(dim=-1).values  # B S
         sim_range = sim_max - sim_min
         b_idx = sim_range.argmax(dim=1)
-    
+
     else:
         raise ValueError(
             f"Unknown reference view selection strategy: {strategy}. "
             f"Must be one of: 'first', 'middle', 'saddle_balanced', 'saddle_sim_range'"
         )
-    
-    return b_idx
+
+    return b_idx.to(device=x.device)
 
 
 def reorder_by_reference(
