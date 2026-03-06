@@ -19,6 +19,7 @@ import gc
 import glob
 import json
 import os
+import random
 import shutil
 import sys
 from datetime import datetime
@@ -130,7 +131,7 @@ def remove_duplicates(data_list):
 
 
 class DA3_Streaming:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(self, image_dir, save_dir, config, device=None, seed=None):
         self.config = config
 
         self.chunk_size = self.config["Model"]["chunk_size"]
@@ -138,8 +139,8 @@ class DA3_Streaming:
         self.overlap_s = 0
         self.overlap_e = self.overlap - self.overlap_s
         self.conf_threshold = 1.5
-        self.seed = 42
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.seed = seed if seed is not None else 42
+        self.device = device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = (
             torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         )
@@ -877,51 +878,178 @@ def copy_file(src_path, dst_dir):
         print(f"Copy Error: {e}")
 
 
+def find_leaf_image_dirs(root):
+    """
+    Find all leaf directories under root that contain image files.
+    A leaf directory has no subdirectories and contains at least one .jpg/.jpeg/.png.
+    Returns list of absolute paths, sorted lexicographically.
+    """
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        return []
+    image_suffixes = (".jpg", ".jpeg", ".png")
+    leaf_dirs = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        has_image = any(
+            f.lower().endswith(image_suffixes) for f in filenames
+        )
+        if has_image and len(dirnames) == 0:
+            leaf_dirs.append(os.path.abspath(dirpath))
+    return sorted(leaf_dirs)
+
+
+def is_sequence_already_processed(save_dir):
+    """Return True if this save_dir has a successful run (merged point cloud exists)."""
+    combined_ply = os.path.join(save_dir, "pcd", "combined_pcd.ply")
+    return os.path.isfile(combined_ply)
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="DA3-Streaming")
-    parser.add_argument("--image_dir", type=str, required=True, help="Image path")
+    parser.add_argument(
+        "--image_dir",
+        type=str,
+        default=None,
+        help="Single image directory (sequence of frames)",
+    )
+    parser.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Root directory: process all leaf dirs with images under it (e.g. frames/)",
+    )
     parser.add_argument(
         "--config",
         type=str,
         required=False,
         default="./configs/base_config.yaml",
-        help="Image path",
+        help="Config YAML path",
     )
     parser.add_argument("--output_dir", type=str, required=False, default=None, help="Output path")
+    parser.add_argument(
+        "--random",
+        type=int,
+        default=None,
+        metavar="N",
+        help="[--root only] Process N directories chosen at random (default: all in sorted order)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device for inference (e.g. cuda, cuda:0, cpu). Default: cuda if available else cpu.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility. Default: 42.",
+    )
     args = parser.parse_args()
 
+    if args.root is None and args.image_dir is None:
+        parser.error("Either --image_dir or --root is required")
+    if args.root is not None and args.image_dir is not None:
+        parser.error("Use only one of --image_dir or --root")
+
     config = load_config(args.config)
-
-    image_dir = args.image_dir
-    path = image_dir.split("/")
-
-    if args.output_dir is not None:
-        save_dir = args.output_dir
-    else:
-        current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        exp_dir = "./exps"
-        save_dir = os.path.join(exp_dir, image_dir.replace("/", "_"), current_datetime)
-
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-        print(f"The exp will be saved under dir: {save_dir}")
-        copy_file(args.config, save_dir)
 
     if config["Model"]["align_lib"] == "numba":
         warmup_numba()
 
-    da3_streaming = DA3_Streaming(image_dir, save_dir, config)
-    da3_streaming.run()
-    da3_streaming.close()
+    if args.root is not None:
+        leaf_dirs = find_leaf_image_dirs(args.root)
+        if not leaf_dirs:
+            print(f"[WARN] No leaf directories with images found under {args.root}")
+            sys.exit(0)
+        if args.random is not None:
+            n = min(max(1, args.random), len(leaf_dirs))
+            leaf_dirs = random.sample(leaf_dirs, n)
+            print(f"[INFO] Randomly chosen {n} sequence(s) from {len(find_leaf_image_dirs(args.root))} under {args.root}")
+        else:
+            print(f"[INFO] Found {len(leaf_dirs)} sequence(s) under {args.root}")
+        failed = []
+        skipped = 0
+        for idx, image_dir in enumerate(leaf_dirs):
+            if args.output_dir is not None:
+                save_dir = os.path.join(
+                    args.output_dir,
+                    os.path.relpath(image_dir, args.root).replace(os.sep, "_"),
+                )
+            else:
+                current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+                exp_dir = "./exps"
+                save_dir = os.path.join(
+                    exp_dir, image_dir.replace("/", "_").replace(os.sep, "_"), current_datetime
+                )
+            if is_sequence_already_processed(save_dir):
+                print(f"\n[{idx + 1}/{len(leaf_dirs)}] Skipping (already processed): {image_dir}")
+                skipped += 1
+                continue
+            print(f"\n[{idx + 1}/{len(leaf_dirs)}] Processing: {image_dir}")
+            try:
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir, exist_ok=True)
+                print(f"The exp will be saved under dir: {save_dir}")
+                copy_file(args.config, save_dir)
 
-    del da3_streaming
-    torch.cuda.empty_cache()
-    gc.collect()
+                da3_streaming = DA3_Streaming(
+                    image_dir, save_dir, config,
+                    device=args.device,
+                    seed=args.seed,
+                )
+                da3_streaming.run()
+                da3_streaming.close()
 
-    all_ply_path = os.path.join(save_dir, "pcd/combined_pcd.ply")
-    input_dir = os.path.join(save_dir, "pcd")
-    print("Saving all the point clouds")
-    merge_ply_files(input_dir, all_ply_path)
-    print("DA3-Streaming done.")
-    sys.exit()
+                del da3_streaming
+                torch.cuda.empty_cache()
+                gc.collect()
+
+                all_ply_path = os.path.join(save_dir, "pcd", "combined_pcd.ply")
+                input_dir = os.path.join(save_dir, "pcd")
+                print("Saving all the point clouds")
+                merge_ply_files(input_dir, all_ply_path)
+            except Exception as e:
+                print(f"[ERROR] Failed: {image_dir}\n  {e}")
+                failed.append((image_dir, str(e)))
+                import traceback
+                traceback.print_exc()
+        if failed:
+            print(f"\n[WARN] {len(failed)} sequence(s) failed: {[p[0] for p in failed]}")
+        if skipped:
+            print(f"[INFO] Skipped {skipped} already processed.")
+        print("\nDA3-Streaming done (all sequences).")
+    else:
+        image_dir = args.image_dir
+        if args.output_dir is not None:
+            save_dir = args.output_dir
+        else:
+            current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+            exp_dir = "./exps"
+            save_dir = os.path.join(exp_dir, image_dir.replace("/", "_"), current_datetime)
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        print(f"The exp will be saved under dir: {save_dir}")
+        copy_file(args.config, save_dir)
+
+        da3_streaming = DA3_Streaming(
+            image_dir, save_dir, config,
+            device=args.device,
+            seed=args.seed,
+        )
+        da3_streaming.run()
+        da3_streaming.close()
+
+        del da3_streaming
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        all_ply_path = os.path.join(save_dir, "pcd", "combined_pcd.ply")
+        input_dir = os.path.join(save_dir, "pcd")
+        print("Saving all the point clouds")
+        merge_ply_files(input_dir, all_ply_path)
+        print("DA3-Streaming done.")
+
+    sys.exit(0)

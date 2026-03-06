@@ -33,3 +33,6 @@ input_images*/
 src/debug_main.py
 temp*.png
 /outputs
+
+da3_streaming/weights
+da3_streaming/exps
